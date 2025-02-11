@@ -1,6 +1,18 @@
 CREATE OR ALTER VIEW [presentation].[v_projection_fact_production] AS
-WITH 
-last_doc AS (
+WITH
+production_materials AS (
+	SELECT  
+		material_id
+	FROM 
+		(SELECT DISTINCT 
+			material_id,
+			LEFT(doc_name, 3) AS source
+		FROM [dwh].[projection_production_plan]
+		WHERE material_id IS NOT NULL) AS distinct_materials
+	GROUP BY material_id
+	HAVING COUNT(1) > 1
+)
+,last_doc AS (
 	SELECT 
 		CONCAT(pil_material_id, material_id) AS id
 		,fiscal_year
@@ -40,6 +52,7 @@ last_doc AS (
 		ON material_mapping.pil_material_id = coid.material_id 
 	JOIN [presentation].[general_dim_date_fiscal] AS dim_date
 		ON coid.bsc_start = dim_date.date
+	WHERE coid.doc_name = 'COID-PIL_20250101_040003.csv'
 	GROUP BY material_mapping.material_id, dim_date.FiscalPeriod, dim_date.FiscalYear
 )
 ,pmn_coid AS (
@@ -58,18 +71,23 @@ last_doc AS (
 		material_id,
 		fiscal_period,
 		fiscal_year,
-		units_forecast
+		units_forecast,
+		'PIL' AS source
 	FROM pil_coid
 	UNION ALL 
 	SELECT
 		material_id,
 		fiscal_period,
 		fiscal_year,
-		units_forecast
+		units_forecast,
+		'PMN' AS source
 	FROM pmn_coid
 )
 SELECT 
-	prod_plan.material_id
+	CASE
+		WHEN production_materials.material_id IS NULL THEN prod_plan.material_id
+		ELSE CONCAT(prod_plan.material_id, '_', prod_plan.source) 
+	END AS material_id
 	,prod_plan.fiscal_period
 	,prod_plan.fiscal_year
 	,prod_plan.first_day_of_period
@@ -81,3 +99,6 @@ LEFT JOIN prod_forecast
 	ON prod_plan.material_id = prod_forecast.material_id
 	AND prod_plan.fiscal_year = prod_forecast.fiscal_year
 	AND prod_plan.fiscal_period = prod_forecast.fiscal_period
+	AND prod_plan.source = prod_forecast.source
+LEFT JOIN production_materials
+	ON prod_plan.material_id = production_materials.material_id

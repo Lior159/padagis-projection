@@ -3,8 +3,8 @@ WITH
 dim_date AS (
 	SELECT DISTINCT
 		YearWeekINT
-		,FiscalYear
-		,FiscalPeriod
+		,CAST(FiscalYear AS INT) AS FiscalYear 
+		,CAST(FiscalPeriod AS INT) AS FiscalPeriod
 		,MIN(Date) OVER (PARTITION BY FiscalYear, FiscalPeriod) AS first_day_of_period
 	FROM dwh.general_dim_date_fiscal AS fiscal_weeks
 )
