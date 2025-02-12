@@ -1,4 +1,4 @@
-CREATE OR ALTER VIEW [presentation].[v_projection_fact_inv] AS
+--CREATE OR ALTER VIEW [presentation].[v_projection_fact_inv] AS
 WITH spi AS (
 	SELECT 
 		sales.material_id,
