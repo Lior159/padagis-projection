@@ -1,4 +1,4 @@
-CREATE OR ALTER VIEW [presentation].[v_projection_fact_inventory] AS
+--CREATE OR ALTER VIEW [presentation].[v_projection_fact_inventory] AS
 WITH 
 otif AS (
 	SELECT  
@@ -38,8 +38,8 @@ otif AS (
 	SELECT 
 		ISNULL(production_plan.material_id, material_mapping.material_id) AS material_id
 		,production_plan.pil_material_id
-		,production_plan.fiscal_period
-		,production_plan.fiscal_year
+		,CAST(otif_dim_date.FiscalPeriod AS INT) AS fiscal_period
+		,CAST(otif_dim_date.FiscalYear  AS INT) AS fiscal_year
 		,dim_date.date AS first_day_of_period
 		,production_plan.units_plan
 		,production_plan.site
@@ -47,13 +47,20 @@ otif AS (
 	JOIN plan_last_doc_date 
 		ON production_plan.site = plan_last_doc_date.site
 		AND production_plan.doc_date = plan_last_doc_date.last_date
-	JOIN dwh.general_dim_date_fiscal AS dim_date
-		ON production_plan.fiscal_year = dim_date.FiscalYear
-		AND production_plan.fiscal_period = dim_date.FiscalPeriod
-		AND [first_day_of_period] = 1
 	LEFT JOIN [dwh].[projection_material_id_mapping] AS material_mapping
 		ON production_plan.pil_material_id = material_mapping.pil_material_id
 		AND production_plan.material_id IS NULL
+	LEFT JOIN otif 
+		ON ISNULL(production_plan.material_id, material_mapping.material_id) = otif.material_id
+	JOIN dwh.general_dim_date_fiscal AS otif_dim_date
+		ON DATEADD(
+			DAY, 
+			ISNULL(otif.planned_delivery_time, 0), 
+			CONCAT(production_plan.fiscal_year, '-', production_plan.fiscal_period, '-', '15')) = otif_dim_date.date
+	JOIN dwh.general_dim_date_fiscal AS dim_date
+		ON otif_dim_date.FiscalYear = dim_date.FiscalYear
+		AND otif_dim_date.FiscalPeriod = dim_date.FiscalPeriod
+		AND dim_date.first_day_of_period = 1
 	WHERE ISNULL(production_plan.material_id, material_mapping.material_id) IS NOT NULL
 )
 ,pil_coid AS (
@@ -69,9 +76,9 @@ otif AS (
 		ON material_mapping.material_id = CAST(otif.material_id AS VARCHAR)
 	JOIN [presentation].[general_dim_date_fiscal] AS dim_date
 		ON DATEADD(DAY, ISNULL(otif.planned_delivery_time, 0), coid.bsc_start) = dim_date.date
-	--JOIN first_day_of_current_period 
-	--	ON coid.doc_date = first_day_of_current_period.date
-	WHERE coid.doc_name = 'COID-PIL_20250101_040003.csv'
+	JOIN first_day_of_current_period 
+		ON coid.doc_date = first_day_of_current_period.date
+	--WHERE coid.doc_name = 'COID-PIL_20250101_040003.csv'
 	GROUP BY material_mapping.material_id, dim_date.FiscalPeriod, dim_date.FiscalYear
 )
 ,pmn_coid AS (
@@ -131,6 +138,8 @@ otif AS (
 	LEFT JOIN inventory
 		ON ISNULL(production_plan.material_id, sales.material_id) = inventory.material_id
 		AND rnk = 1
+	CROSS JOIN first_day_of_current_period
+	WHERE ISNULL(production_plan.first_day_of_period, sales.first_day_of_period) >= first_day_of_current_period.date
 )
 ,inventory_projection AS (
 	SELECT 
@@ -168,3 +177,5 @@ SELECT
 	,current_inventory + production_forecast_running_sum - sales_forecast_running_sum AS inventoy_forecast
 	,site
 FROM inventory_projection 
+--CROSS JOIN first_day_of_current_period
+--WHERE first_day_of_period >= date
