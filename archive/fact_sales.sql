@@ -45,10 +45,10 @@ first_day_of_current_period AS (
 		,SUM(forecast) AS units_forecast
 		,asp * SUM(forecast) AS amount_forecast
 	FROM bplan
-	LEFT JOIN [dwh].[mng_asp] AS mng_asp
-		ON bplan.material_id = mng_asp.material
-		AND bplan.fiscal_year = YEAR(mng_asp.date)
-		AND bplan.fiscal_period = MONTH(mng_asp.date)
+	LEFT JOIN [dwh].[mng_asp] AS asp
+		ON bplan.material_id = asp.material
+		AND bplan.fiscal_year = YEAR(asp.date)
+		AND bplan.fiscal_period = MONTH(asp.date)
 	WHERE row = 1 
 	GROUP BY material_id, fiscal_period, fiscal_year, first_day_of_period, asp
 )
@@ -120,7 +120,6 @@ FULL JOIN sales_actual
 	ON COALESCE(sales_forecast.material_id, sales_plan.material_id) = sales_actual.material_id
 	AND COALESCE(sales_forecast.fiscal_year, sales_plan.fiscal_year) = sales_actual.fiscal_year
 	AND COALESCE(sales_forecast.fiscal_period, sales_plan.fiscal_period) = sales_actual.fiscal_period
-	WHERE ISNUMERIC(COALESCE(sales_forecast.material_id, sales_plan.material_id, sales_actual.material_id)) = 1
 GO
 
 

@@ -1,4 +1,4 @@
-CREATE OR ALTER VIEW [presentation].[v_projection_fact_inventory] AS
+--CREATE OR ALTER VIEW [presentation].[v_projection_fact_inventory] AS
 WITH 
 dim_date AS (
 	SELECT 
@@ -116,7 +116,7 @@ otif AS (
 		ON COALESCE(production_plan.material_id, production_forecast.material_id) = sales.material_id
 		AND COALESCE(production_plan.fiscal_year, production_forecast.fiscal_year) = sales.fiscal_year
 		AND COALESCE(production_plan.fiscal_period, production_forecast.fiscal_period) = sales.fiscal_period
-	LEFT JOIN inventory
+	FULL JOIN inventory
 		ON COALESCE(production_plan.material_id, production_forecast.material_id, sales.material_id) = inventory.material_id
 		AND COALESCE(production_plan.fiscal_year, production_forecast.fiscal_year, sales.fiscal_year) = inventory.fiscal_year
 		AND COALESCE(production_plan.fiscal_period, production_forecast.fiscal_period, sales.fiscal_period) = inventory.fiscal_period
@@ -158,13 +158,13 @@ SELECT
 	,fiscal_period
 	,first_day_of_period
 	,sales_plan
-	--,sales_plan_running_sum
+	,sales_plan_running_sum
 	,sales_forecast
-	--,sales_forecast_running_sum
+	,sales_forecast_running_sum
 	,production_plan
-	--,production_plan_running_sum
+	,production_plan_running_sum
 	,production_forecast
-	--,production_forecast_running_sum
+	,production_forecast_running_sum
 	,starting_inventory
 	,starting_inventory + production_plan_running_sum - sales_plan_running_sum AS inventoy_plan
 	,starting_inventory + production_forecast_running_sum - sales_forecast_running_sum AS inventoy_forecast

@@ -1,104 +1,72 @@
 CREATE OR ALTER VIEW [presentation].[v_projection_fact_production] AS
-WITH
-production_materials AS (
-	SELECT  
-		material_id
-	FROM 
-		(SELECT DISTINCT 
-			material_id,
-			LEFT(doc_name, 3) AS source
-		FROM [dwh].[projection_production_plan]
-		WHERE material_id IS NOT NULL) AS distinct_materials
-	GROUP BY material_id
-	HAVING COUNT(1) > 1
-)
-,last_doc AS (
+WITH 
+first_day_of_current_period AS (
 	SELECT 
-		CONCAT(pil_material_id, material_id) AS id
-		,fiscal_year
-		,fiscal_period
-		,MAX(doc_date) AS max_doc_date
+		date
+	FROM dwh.general_dim_date_fiscal 
+	WHERE first_day_of_period = 1
+		AND CONCAT(FiscalPeriod, FiscalYear) = (SELECT CONCAT(FiscalPeriod, FiscalYear) FROM dwh.general_dim_date_fiscal WHERE date = CAST(GETDATE() AS DATE))
+)
+,plan_last_doc_date AS (
+	SELECT 
+		MAX(doc_date) AS date
 	FROM dwh.projection_production_plan
-	GROUP BY CONCAT(pil_material_id, material_id), fiscal_year, fiscal_period
+	WHERE site = 'PMN'
 )
-,prod_plan AS (
+,forecast_last_doc_date AS (
 	SELECT 
-		material_id
+		MAX(doc_date) AS date
+	FROM dwh.projection_pmn_coid
+)
+,production_plan AS (
+	SELECT 
+		production_plan.material_id
 		,production_plan.fiscal_period
 		,production_plan.fiscal_year
-		,date AS first_day_of_period
-		,units_plan
-		,LEFT(doc_name, 3) AS source
+		,production_plan.units_plan
 	FROM dwh.projection_production_plan AS production_plan
-	JOIN last_doc 
-		ON CONCAT(production_plan.pil_material_id, production_plan.material_id) = last_doc.id
-		AND production_plan.fiscal_year = last_doc.fiscal_year
-		AND production_plan.fiscal_period = last_doc.fiscal_period
-		AND max_doc_date = doc_date
-	JOIN dwh.general_dim_date_fiscal AS dim_date
-		ON production_plan.fiscal_year = dim_date.FiscalYear
-		AND production_plan.fiscal_period = dim_date.FiscalPeriod
-		AND [first_day_of_period] = 1
-	WHERE material_id IS NOT NULL
-)
-,pil_coid AS (
-	SELECT
-		material_mapping.material_id,
-		dim_date.FiscalPeriod AS fiscal_period,
-		dim_date.FiscalYear AS fiscal_year,
-		SUM(coid.target_qty) AS units_forecast
-	FROM [dwh].[projection_material_id_mapping] AS material_mapping
-	LEFT JOIN [dwh].[projection_pil_coid] AS coid
-		ON material_mapping.pil_material_id = coid.material_id 
-	JOIN [presentation].[general_dim_date_fiscal] AS dim_date
-		ON coid.bsc_start = dim_date.date
-	WHERE coid.doc_name = 'COID-PIL_20250101_040003.csv'
-	GROUP BY material_mapping.material_id, dim_date.FiscalPeriod, dim_date.FiscalYear
+	JOIN plan_last_doc_date 
+		ON production_plan.doc_date = plan_last_doc_date.date
+	WHERE production_plan.material_id IS NOT NULL 
+		AND production_plan.fiscal_year >= 2025
 )
 ,pmn_coid AS (
 	SELECT
 		coid.material_id,
 		dim_date.FiscalPeriod AS fiscal_period,
 		dim_date.FiscalYear AS fiscal_year,
-		SUM(coid.target_qty) AS units_forecast
+		SUM(IIF(coid.bsc_start >= first_day_of_current_period.date, coid.order_quantity * 0.9, NULL)) AS units_forecast,
+		SUM(IIF(coid.bsc_start < first_day_of_current_period.date AND coid.act_finish_date > coid.bsc_start, coid.del_quantity, NULL)) AS units_actual
 	FROM [dwh].[projection_pmn_coid] AS coid
+	JOIN forecast_last_doc_date 
+		ON coid.doc_date = forecast_last_doc_date.date
 	JOIN [presentation].[general_dim_date_fiscal] AS dim_date
 		ON coid.bsc_start = dim_date.date
+	CROSS JOIN first_day_of_current_period 
+	WHERE dim_date.FiscalYear >= 2025
 	GROUP BY coid.material_id, dim_date.FiscalPeriod, dim_date.FiscalYear
 )
-,prod_forecast AS (
-	SELECT
-		material_id,
-		fiscal_period,
-		fiscal_year,
-		units_forecast,
-		'PIL' AS source
-	FROM pil_coid
-	UNION ALL 
-	SELECT
-		material_id,
-		fiscal_period,
-		fiscal_year,
-		units_forecast,
-		'PMN' AS source
-	FROM pmn_coid
-)
 SELECT 
-	CASE
-		WHEN production_materials.material_id IS NULL THEN prod_plan.material_id
-		ELSE CONCAT(prod_plan.material_id, '_', prod_plan.source) 
-	END AS material_id
-	,prod_plan.fiscal_period
-	,prod_plan.fiscal_year
-	,prod_plan.first_day_of_period
-	,prod_plan.units_plan
-	,prod_forecast.units_forecast
-	,prod_plan.source
-FROM prod_plan
-LEFT JOIN prod_forecast
-	ON prod_plan.material_id = prod_forecast.material_id
-	AND prod_plan.fiscal_year = prod_forecast.fiscal_year
-	AND prod_plan.fiscal_period = prod_forecast.fiscal_period
-	AND prod_plan.source = prod_forecast.source
-LEFT JOIN production_materials
-	ON prod_plan.material_id = production_materials.material_id
+	ISNULL(production_plan.material_id, pmn_coid.material_id) AS material_id
+	,ISNULL(production_plan.fiscal_year, pmn_coid.fiscal_year) fiscal_year
+	,ISNULL(production_plan.fiscal_period, pmn_coid.fiscal_period) AS fiscal_period
+	,dim_date.date AS first_day_of_period
+	,production_plan.units_plan
+	,pmn_coid.units_forecast
+	,pmn_coid.units_actual
+	,production_plan.units_plan * asp AS amount_plan
+	,pmn_coid.units_forecast * asp AS amount_forecast
+	,pmn_coid.units_actual * asp AS amount_actual
+FROM production_plan
+FULL JOIN pmn_coid 
+	ON production_plan.material_id = pmn_coid.material_id
+	AND production_plan.fiscal_year = pmn_coid.fiscal_year
+	AND production_plan.fiscal_period = pmn_coid.fiscal_period
+LEFT JOIN [dwh].[mng_asp] AS mng_asp
+		ON ISNULL(production_plan.material_id, pmn_coid.material_id) = mng_asp.material
+		AND ISNULL(production_plan.fiscal_year, pmn_coid.fiscal_year) = YEAR(mng_asp.date)
+		AND ISNULL(production_plan.fiscal_period, pmn_coid.fiscal_period) = MONTH(mng_asp.date)
+JOIN dwh.general_dim_date_fiscal AS dim_date
+	ON ISNULL(production_plan.fiscal_year, pmn_coid.fiscal_year) = dim_date.FiscalYear
+	AND ISNULL(production_plan.fiscal_period, pmn_coid.fiscal_period) = dim_date.FiscalPeriod
+	AND dim_date.first_day_of_period = 1

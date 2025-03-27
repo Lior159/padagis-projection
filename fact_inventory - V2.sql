@@ -83,7 +83,7 @@ otif AS (
 		dim_date.fiscal_year,
 		dim_date.fiscal_period,
 		dim_date.first_day_of_period,
-		SUM(coid.order_quantity) AS units_forecast
+		SUM(coid.order_quantity * 0.9) AS units_forecast
 	FROM [dwh].[projection_pmn_coid] AS coid
 	JOIN forecast_last_doc_date 
 		ON coid.doc_date = forecast_last_doc_date.date
@@ -96,12 +96,13 @@ otif AS (
 		dim_date.fiscal_period,
 		dim_date.first_day_of_period
 )
-,SPI AS (
+,combined_projection_data AS (
 	SELECT 
 		COALESCE(production_plan.material_id, production_forecast.material_id, sales.material_id) AS material_id
 		,COALESCE(production_plan.fiscal_year, production_forecast.fiscal_year, sales.fiscal_year) AS fiscal_year
 		,COALESCE(production_plan.fiscal_period, production_forecast.fiscal_period, sales.fiscal_period) AS fiscal_period
 		,COALESCE(production_plan.first_day_of_period, production_forecast.first_day_of_period, sales.first_day_of_period) AS first_day_of_period
+		,first_day_of_current_period.date AS first_day_of_current_period
 		,ISNULL(sales.units_plan, 0) AS sales_plan
 		,ISNULL(sales.units_forecast, 0) AS sales_forecast
 		,ISNULL(production_plan.units_plan, 0) AS production_plan
@@ -120,6 +121,7 @@ otif AS (
 		ON COALESCE(production_plan.material_id, production_forecast.material_id, sales.material_id) = inventory.material_id
 		AND COALESCE(production_plan.fiscal_year, production_forecast.fiscal_year, sales.fiscal_year) = inventory.fiscal_year
 		AND COALESCE(production_plan.fiscal_period, production_forecast.fiscal_period, sales.fiscal_period) = inventory.fiscal_period
+	CROSS JOIN first_day_of_current_period
 		--AND rnk = 1
 )
 ,inventory_projection AS (
@@ -128,29 +130,16 @@ otif AS (
 		,fiscal_year
 		,fiscal_period
 		,first_day_of_period
-		,sales_plan
-		,SUM(IIF(first_day_of_period >= first_day_of_current_period.date,sales_plan,0)) OVER (
-			PARTITION BY material_id, fiscal_year 
-			ORDER BY fiscal_period) AS sales_plan_running_sum
-		,sales_forecast
-		,SUM(IIF(first_day_of_period >= first_day_of_current_period.date,sales_forecast,0)) OVER (
-			PARTITION BY material_id, fiscal_year 
-			ORDER BY fiscal_period) AS sales_forecast_running_sum
-		,production_plan
-		,SUM(IIF(first_day_of_period >= first_day_of_current_period.date,production_plan,0)) OVER (
-			PARTITION BY material_id, fiscal_year 
-			ORDER BY fiscal_period) AS production_plan_running_sum
-		,production_forecast
-		,SUM(IIF(first_day_of_period >= first_day_of_current_period.date,production_forecast,0)) OVER (
-			PARTITION BY material_id, fiscal_year 
-			ORDER BY fiscal_period) AS production_forecast_running_sum
-		,CASE
-			WHEN first_day_of_period < first_day_of_current_period.date THEN starting_inventory
-			ELSE MAX(IIF(first_day_of_period >= first_day_of_current_period.date, starting_inventory, NULL)) OVER (PARTITION BY material_id)
-		END AS starting_inventory
-	FROM SPI
-	CROSS JOIN first_day_of_current_period
-	--WHERE first_day_of_period >= first_day_of_current_period.date
+		,first_day_of_current_period
+		,IIF(first_day_of_period >= first_day_of_current_period, sales_plan, 0) AS sales_plan
+		,IIF(first_day_of_period >= first_day_of_current_period, sales_forecast, 0) AS sales_forecast
+		,IIF(first_day_of_period >= first_day_of_current_period, production_plan, 0) AS production_plan
+		,IIF(first_day_of_period >= first_day_of_current_period, production_forecast, 0) AS production_forecast
+		,IIF(first_day_of_period < first_day_of_current_period, 
+			LEAD(starting_inventory, 1) OVER (PARTITION BY material_id ORDER BY fiscal_year, fiscal_period),
+			NULL) AS actual_inventory
+		,IIF(first_day_of_period = first_day_of_current_period, starting_inventory, NULL) AS starting_inventory
+	FROM combined_projection_data
 )
 SELECT 
 	material_id
@@ -158,16 +147,18 @@ SELECT
 	,fiscal_period
 	,first_day_of_period
 	,sales_plan
-	--,sales_plan_running_sum
 	,sales_forecast
-	--,sales_forecast_running_sum
 	,production_plan
-	--,production_plan_running_sum
 	,production_forecast
-	--,production_forecast_running_sum
 	,starting_inventory
-	,starting_inventory + production_plan_running_sum - sales_plan_running_sum AS inventoy_plan
-	,starting_inventory + production_forecast_running_sum - sales_forecast_running_sum AS inventoy_forecast
+	,CASE
+		WHEN first_day_of_period < first_day_of_current_period THEN actual_inventory
+		ELSE SUM(IIF(first_day_of_period >= first_day_of_current_period, ISNULL(starting_inventory, 0) + production_plan - sales_plan, 0)) 
+			OVER (PARTITION BY material_id ORDER BY fiscal_year, fiscal_period)
+	END AS inventoy_plan
+	,CASE
+		WHEN first_day_of_period < first_day_of_current_period THEN actual_inventory
+		ELSE SUM(IIF(first_day_of_period >= first_day_of_current_period, ISNULL(starting_inventory, 0) + production_forecast - sales_forecast, 0)) 
+			OVER (PARTITION BY material_id ORDER BY fiscal_year, fiscal_period)
+	END AS inventoy_forecast
 FROM inventory_projection 
---CROSS JOIN first_day_of_current_period
---WHERE first_day_of_period >= date
