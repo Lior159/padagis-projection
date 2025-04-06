@@ -71,7 +71,7 @@ otif AS (
 		AND production_plan.fiscal_period = dim_date.fiscal_period
 		AND is_first_day_of_period = 1
 	JOIN dim_date AS otif_dim_date
-		ON DATEADD(DAY, 15 + ISNULL(otif.planned_delivery_time, 0), dim_date.date) = otif_dim_date.date
+		ON DATEADD(DAY, 15 + ISNULL(ROUND((otif.planned_delivery_time / 5.0) * 7, 0), 0), dim_date.date) = otif_dim_date.date
 	GROUP BY production_plan.material_id
 		,otif_dim_date.fiscal_year  
 		,otif_dim_date.fiscal_period 
@@ -90,7 +90,7 @@ otif AS (
 	LEFT JOIN otif
 		ON coid.material_id = CAST(otif.material_id AS VARCHAR)
 	JOIN dim_date AS dim_date
-		ON DATEADD(DAY, ISNULL(otif.planned_delivery_time, 0), coid.bsc_start) = dim_date.date
+		ON DATEADD(DAY, ISNULL(ROUND((otif.planned_delivery_time / 5.0) * 7, 0), 0), coid.bsc_start) = dim_date.date
 	GROUP BY coid.material_id, 
 		dim_date.fiscal_year, 
 		dim_date.fiscal_period,
@@ -166,8 +166,14 @@ SELECT
 	,production_forecast
 	--,production_forecast_running_sum
 	,starting_inventory
-	,starting_inventory + production_plan_running_sum - sales_plan_running_sum AS inventoy_plan
-	,starting_inventory + production_forecast_running_sum - sales_forecast_running_sum AS inventoy_forecast
+	,starting_inventory + production_plan_running_sum - sales_plan_running_sum AS inventory_units_plan
+	,asp * (starting_inventory + production_plan_running_sum - sales_plan_running_sum) AS inventory_amount_plan
+	,starting_inventory + production_forecast_running_sum - sales_forecast_running_sum AS inventory_units_forecast
+	,asp * (starting_inventory + production_forecast_running_sum - sales_forecast_running_sum) AS inventory_amount_forecast
 FROM inventory_projection 
+LEFT JOIN [dwh].[mng_asp] AS mng_asp
+		ON inventory_projection.material_id = mng_asp.material
+		AND inventory_projection.fiscal_year = YEAR(mng_asp.date)
+		AND inventory_projection.fiscal_period  = MONTH(mng_asp.date)
 --CROSS JOIN first_day_of_current_period
 --WHERE first_day_of_period >= date

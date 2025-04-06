@@ -8,7 +8,7 @@ dim_date AS (
 		IIF(MIN(DATE) OVER(PARTITION BY FiscalYear, FiscalPeriod) = DATE, 1,0) is_first_day_of_period
 	FROM dwh.general_dim_date_fiscal
 )
-,first_date_of_current_period AS (
+,first_day_of_current_period AS (
 	SELECT
 		first_day_of_period AS date
 	FROM dim_date
@@ -30,11 +30,12 @@ dim_date AS (
 		OVER (partition by material_id, batch ORDER BY fiscal_year, fiscal_period ASC
 			ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS obsolescence_fiscal_period
 	FROM [presentation].[mng_fact_si_mb52] AS si
-	JOIN first_date_of_current_period
-		ON si.si_date = first_date_of_current_period.date
+	JOIN first_day_of_current_period
+		ON si.si_date = first_day_of_current_period.date
 	JOIN dim_date 
 		ON dim_date.is_first_day_of_period = 1
 		AND fiscal_year >= 2025
+		AND dim_date.Date >= first_day_of_current_period.date
 	WHERE unrestricted > 0
 	AND DATEDIFF(MONTH, dim_date.first_day_of_period, shell_life_exp_date) <= 12
 )
@@ -43,8 +44,8 @@ dim_date AS (
 		material_id,
 		fiscal_year,
 		fiscal_period,
-		SUM(obsolescence_qty) AS obsolescence_qty,
-		SUM(obsolescence_amount) AS obsolescence_amount
+		CAST(SUM(obsolescence_qty) AS INT) AS obsolescence_qty,
+		CAST(SUM(obsolescence_amount) AS INT) AS obsolescence_amount
 	FROM OBS
 	WHERE fiscal_year = obsolescence_fiscal_year
 		AND fiscal_period = obsolescence_fiscal_period
@@ -56,23 +57,26 @@ dim_date AS (
 		,inv.fiscal_year
 		,inv.fiscal_period
 		,first_day_of_period
+		,first_day_of_current_period.date AS first_day_of_current_period
 		,starting_inventory
 		,sales_plan
 		,production_plan
 		,sales_forecast
 		,production_forecast
-		,inventoy_plan
-		,inventoy_forecast
+		,inventory_units_plan AS inventory_plan
+		,inventory_units_forecast AS inventory_forecast
 		,MAX(IIF(obsolescence_qty IS NOT NULL, inv.fiscal_period, NULL)) OVER (
 			PARTITION BY inv.material_id 
 			ORDER BY inv.fiscal_year, inv.fiscal_period 
 			ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS last_obs_period
 		,obsolescence_qty
+		,obsolescence_amount
 	FROM [presentation].[v_projection_fact_inventory] AS inv
 	LEFT JOIN agg_obs
 		ON inv.material_id = agg_obs.material_id
 		AND inv.fiscal_year = agg_obs.fiscal_year
 		AND inv.fiscal_period = agg_obs.fiscal_period
+	CROSS JOIN first_day_of_current_period
 )
 ,inv_obs_projection AS (
 	SELECT 
@@ -80,13 +84,14 @@ dim_date AS (
 		,fiscal_year
 		,fiscal_period
 		,first_day_of_period
+		,first_day_of_current_period
 		,starting_inventory
 		,sales_plan
 		,production_plan
-		,inventoy_plan
+		,inventory_plan
 		,sales_forecast
 		,production_forecast
-		,inventoy_forecast
+		,inventory_forecast
 		,last_obs_period
 		,CASE
 			WHEN obsolescence_qty IS NOT NULL THEN
@@ -104,10 +109,6 @@ dim_date AS (
 					WHEN 11 THEN SUM(sales_plan) OVER (PARTITION BY material_id ORDER BY fiscal_year, fiscal_period ROWS BETWEEN 11 PRECEDING AND 1 PRECEDING) 
 					WHEN 12 THEN SUM(sales_plan) OVER (PARTITION BY material_id ORDER BY fiscal_year, fiscal_period ROWS BETWEEN 12 PRECEDING AND 1 PRECEDING) 
 				END
-			--SUM(IIF(fiscal_period >=  last_obs_period, sales_plan, 0)) OVER (
-			--	PARTITION BY material_id 
-			--	ORDER BY fiscal_period 
-			--	ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) 
 		END AS cumulative_sales_plan
 		,CASE
 			WHEN obsolescence_qty IS NOT NULL THEN
@@ -125,12 +126,9 @@ dim_date AS (
 					WHEN 11 THEN SUM(sales_forecast) OVER (PARTITION BY material_id ORDER BY fiscal_year, fiscal_period ROWS BETWEEN 11 PRECEDING AND 1 PRECEDING) 
 					WHEN 12 THEN SUM(sales_forecast) OVER (PARTITION BY material_id ORDER BY fiscal_year, fiscal_period ROWS BETWEEN 12 PRECEDING AND 1 PRECEDING) 
 				END
-			--SUM(IIF(fiscal_period >=  last_obs_period, sales_plan, 0)) OVER (
-			--	PARTITION BY material_id 
-			--	ORDER BY fiscal_period 
-			--	ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) 
 		END AS cumulative_sales_forecast
 		,obsolescence_qty
+		,obsolescence_amount
 	FROM inv_obs
 )
 SELECT 
@@ -141,21 +139,33 @@ SELECT
 	,starting_inventory
 	,sales_plan
 	,production_plan
-	,inventoy_plan
+	,CASE
+		WHEN first_day_of_period < first_day_of_current_period THEN inventory_plan
+		ELSE SUM(
+			IIF(first_day_of_period >= first_day_of_current_period, 
+				ISNULL(starting_inventory, 0) + production_plan - sales_plan - ISNULL(obsolescence_qty, 0) + ISNULL(cumulative_sales_plan, 0), 
+				0)) 
+			OVER (PARTITION BY material_id ORDER BY fiscal_year, fiscal_period)
+	END AS inventoy_plan
 	,sales_forecast
-	,production_forecast
-	,inventoy_forecast
+	,production_forecast 
+	,CASE
+		WHEN first_day_of_period < first_day_of_current_period THEN inventory_forecast
+		ELSE SUM(
+			IIF(first_day_of_period >= first_day_of_current_period, 
+				ISNULL(starting_inventory, 0) + production_forecast - sales_forecast - ISNULL(obsolescence_qty, 0) + ISNULL(cumulative_sales_forecast, 0), 
+				0)) 
+				OVER (PARTITION BY material_id ORDER BY fiscal_year, fiscal_period)
+	END AS inventoy_forecast
 	,last_obs_period
 	,cumulative_sales_plan
 	,cumulative_sales_forecast
 	,obsolescence_qty
-	,obsolescence_qty
+	,obsolescence_amount
 FROM inv_obs_projection
 WHERE material_id = '5000403' 
---WHERE inv.material_id = '5005301' 
+--WHERE material_id IN ('5000403', '5005302' )
 ORDER BY
 	material_id,
 	fiscal_year,
 	fiscal_period
---select * from [presentation].[mng_fact_si_mb52] where material_id = '5005301' 
---SELECT * FROM [presentation].[v_projection_fact_inventory] WHERE  material_id = '5000403' 
