@@ -31,7 +31,7 @@ first_day_of_current_period AS (
 		ON production_plan.doc_date = plan_last_doc_date.date
 	WHERE production_plan.material_id IS NOT NULL 
 		AND production_plan.material_id NOT LIKE '4%'
-		AND production_plan.fiscal_year >= 2025
+		AND production_plan.fiscal_year >= YEAR(GETDATE())
 )
 ,pmn_coid AS (
 	SELECT
@@ -39,7 +39,7 @@ first_day_of_current_period AS (
 		dim_date.FiscalPeriod AS fiscal_period,
 		dim_date.FiscalYear AS fiscal_year,
 		file_name,
-		SUM(IIF(coid.bsc_start >= first_day_of_current_period.date, coid.order_quantity * 0.9, NULL)) AS units_forecast,
+		SUM(coid.order_quantity * 0.9) AS units_forecast,
 		SUM(IIF(coid.bsc_start < first_day_of_current_period.date AND coid.act_finish_date > coid.bsc_start, coid.del_quantity, NULL)) AS units_actual
 	FROM [dwh].[projection_pmn_coid] AS coid
 	JOIN forecast_last_doc_date 
@@ -58,14 +58,26 @@ SELECT
 	,ISNULL(production_plan.fiscal_period, pmn_coid.fiscal_period) AS fiscal_period
 	,dim_date.date AS first_day_of_period
 	,production_plan.units_plan
-	,COALESCE(pmn_coid.units_actual, production_plan.units_plan) AS units_plan_with_actual
+	,CASE
+		WHEN dim_date.date >= first_day_of_current_period.date THEN production_plan.units_plan
+		ELSE pmn_coid.units_actual
+	END AS units_plan_with_actual
 	,pmn_coid.units_forecast 
-	,COALESCE(pmn_coid.units_actual, pmn_coid.units_forecast) AS units_forecast_with_actual
+	,CASE
+		WHEN dim_date.date >= first_day_of_current_period.date THEN pmn_coid.units_forecast
+		ELSE pmn_coid.units_actual
+	END AS units_forecast_with_actual
 	,pmn_coid.units_actual
 	,production_plan.units_plan * mng_asp.asp_logic AS amount_plan
-	,COALESCE(pmn_coid.units_actual, production_plan.units_plan) * mng_asp.asp_logic AS amount_plan_with_actual
+	,CASE
+		WHEN dim_date.date >= first_day_of_current_period.date THEN production_plan.units_plan * mng_asp.asp_logic
+		ELSE pmn_coid.units_actual * mng_asp.asp_logic
+	END AS amount_plan_with_actual
 	,pmn_coid.units_forecast * mng_asp.asp_logic AS amount_forecast
-	,COALESCE(pmn_coid.units_actual, pmn_coid.units_forecast) * mng_asp.asp_logic AS amount_forecast_with_actual
+	,CASE
+		WHEN dim_date.date >= first_day_of_current_period.date THEN pmn_coid.units_forecast * mng_asp.asp_logic
+		ELSE pmn_coid.units_actual * mng_asp.asp_logic
+	END AS amount_forecast_with_actual
 	,pmn_coid.units_actual * mng_asp.asp_logic AS amount_actual
 	,MAX(pmn_coid.file_name) OVER () AS last_coid_file
 FROM production_plan
@@ -81,3 +93,5 @@ JOIN dwh.general_dim_date_fiscal AS dim_date
 	ON ISNULL(production_plan.fiscal_year, pmn_coid.fiscal_year) = dim_date.FiscalYear
 	AND ISNULL(production_plan.fiscal_period, pmn_coid.fiscal_period) = dim_date.FiscalPeriod
 	AND dim_date.first_day_of_period = 1
+CROSS JOIN first_day_of_current_period
+

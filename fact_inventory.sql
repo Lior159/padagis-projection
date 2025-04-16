@@ -36,7 +36,6 @@ otif AS (
 		,dim_date.fiscal_year
 		,dim_date.fiscal_period
 		,unrestricted_inventory AS starting_inventory
-		,ROW_NUMBER() OVER (PARTITION BY material_no order by inv.date DESC) rnk 
 	FROM [PowerBI].[presentation].[moe_fact_inv] AS inv
 	JOIN dim_date 
 		ON inv.date = dim_date.date 
@@ -46,10 +45,9 @@ otif AS (
 )
 ,plan_last_doc_date AS (
 	SELECT 
-		site,
-		MAX(doc_date) AS last_date
+		MAX(doc_date) AS date
 	FROM dwh.projection_production_plan
-	GROUP BY site
+	WHERE site = 'PMN'
 )
 ,forecast_last_doc_date AS (
 	SELECT 
@@ -65,8 +63,7 @@ otif AS (
 		,SUM(production_plan.units_plan) AS units_plan
 	FROM dwh.projection_production_plan AS production_plan
 	JOIN plan_last_doc_date 
-		ON production_plan.site = plan_last_doc_date.site
-		AND production_plan.doc_date = plan_last_doc_date.last_date
+		ON production_plan.doc_date = plan_last_doc_date.date
 	LEFT JOIN otif 
 		ON production_plan.material_id = otif.material_id
 	JOIN dim_date
@@ -75,6 +72,9 @@ otif AS (
 		AND is_first_day_of_period = 1
 	JOIN dim_date AS otif_dim_date
 		ON DATEADD(DAY, dim_date.period_days_count + ISNULL(ROUND((otif.planned_delivery_time / 5.0) * 7, 0), 0), dim_date.date) = otif_dim_date.date
+	WHERE production_plan.material_id IS NOT NULL 
+		AND production_plan.material_id NOT LIKE '4%'
+		AND production_plan.fiscal_year >= YEAR(GETDATE())
 	GROUP BY production_plan.material_id
 		,otif_dim_date.fiscal_year  
 		,otif_dim_date.fiscal_period 
@@ -86,15 +86,7 @@ otif AS (
 		dim_date.fiscal_year,
 		dim_date.fiscal_period,
 		dim_date.first_day_of_period,
-		--SUM(IIF(coid.bsc_start >= first_day_of_current_period.date, coid.order_quantity * 0.9, NULL)) AS units_forecast,
-		--SUM(IIF(coid.bsc_start < first_day_of_current_period.date AND coid.act_finish_date > coid.bsc_start, coid.del_quantity, NULL)) AS units_actual
-		SUM(
-			CASE
-				WHEN coid.bsc_start >= first_day_of_current_period.date THEN coid.order_quantity * 0.9
-				WHEN coid.bsc_start < first_day_of_current_period.date AND coid.act_finish_date > coid.bsc_start THEN coid.del_quantity
-			END 
-		) AS units_forecast
-		--SUM(coid.order_quantity * 0.9) AS units_forecast
+		SUM(coid.order_quantity * 0.9) AS units_forecast
 	FROM [dwh].[projection_pmn_coid] AS coid
 	JOIN forecast_last_doc_date 
 		ON coid.doc_date = forecast_last_doc_date.date
@@ -104,6 +96,8 @@ otif AS (
 		ON DATEADD(DAY, ISNULL(ROUND((otif.planned_delivery_time / 5.0) * 7, 0), 0), coid.bsc_start) = dim_date.date
 	CROSS JOIN first_day_of_current_period
 	WHERE YEAR(coid.bsc_start) >= YEAR(GETDATE())
+		AND coid.material_id IS NOT NULL 
+		AND coid.material_id NOT LIKE '4%'
 	GROUP BY coid.material_id, 
 		dim_date.fiscal_year, 
 		dim_date.fiscal_period,
@@ -133,7 +127,6 @@ otif AS (
 		ON COALESCE(production_plan.material_id, production_forecast.material_id, sales.material_id) = inventory.material_id
 		AND COALESCE(production_plan.fiscal_year, production_forecast.fiscal_year, sales.fiscal_year) = inventory.fiscal_year
 		AND COALESCE(production_plan.fiscal_period, production_forecast.fiscal_period, sales.fiscal_period) = inventory.fiscal_period
-		--AND rnk = 1
 )
 ,inventory_projection AS (
 	SELECT 
@@ -161,7 +154,7 @@ otif AS (
 			WHEN first_day_of_period < first_day_of_current_period.date THEN starting_inventory
 			ELSE MAX(IIF(first_day_of_period >= first_day_of_current_period.date, starting_inventory, NULL)) OVER (PARTITION BY material_id)
 		END AS starting_inventory,
-		first_day_of_current_period.Date AS first_date_of_current_period,
+		first_day_of_current_period.Date AS first_day_of_current_period,
 		first_day_of_current_period.FiscalPeriod AS current_fiscal_period,
 		first_day_of_current_period.FiscalYear AS current_fiscal_year
 	FROM SPI
@@ -182,42 +175,42 @@ SELECT
 	,production_forecast
 	--,production_forecast_running_sum
 	,CASE
-		WHEN first_day_of_period >= first_date_of_current_period THEN starting_inventory
+		WHEN first_day_of_period >= first_day_of_current_period THEN starting_inventory
 	END AS starting_inventory
 	,CASE
-		WHEN first_day_of_period = first_date_of_current_period THEN starting_inventory
-		WHEN first_day_of_period > first_date_of_current_period THEN 
+		WHEN first_day_of_period = first_day_of_current_period THEN starting_inventory
+		WHEN first_day_of_period > first_day_of_current_period THEN 
 			LAG(starting_inventory + cumulative_production_forecast - cumulative_sales_forecast) 
 			OVER (PARTITION BY material_id ORDER BY fiscal_year, fiscal_period)
 	END AS forecast_starting_inventory
 	,CASE
-		WHEN first_day_of_period = first_date_of_current_period THEN starting_inventory
-		WHEN first_day_of_period > first_date_of_current_period THEN 
+		WHEN first_day_of_period = first_day_of_current_period THEN starting_inventory
+		WHEN first_day_of_period > first_day_of_current_period THEN 
 			LAG(starting_inventory + cumulative_production_plan - cumulative_sales_plan) 
 			OVER (PARTITION BY material_id ORDER BY fiscal_year, fiscal_period)
 	END AS plan_starting_inventory
 	,CASE
-		WHEN first_day_of_period >= first_date_of_current_period THEN 
+		WHEN first_day_of_period >= first_day_of_current_period THEN 
 			starting_inventory + cumulative_production_plan - cumulative_sales_plan
 		ELSE
 			LEAD(starting_inventory, 1) OVER (PARTITION BY material_id ORDER BY fiscal_year, fiscal_period)
 	END AS inventory_units_plan
 	,CASE
-		WHEN first_day_of_period >= first_date_of_current_period THEN 
+		WHEN first_day_of_period >= first_day_of_current_period THEN 
 			asp_logic * (starting_inventory + cumulative_production_plan - cumulative_sales_plan)
 		ELSE
 			asp_logic * LEAD(starting_inventory, 1) OVER (PARTITION BY material_id ORDER BY fiscal_year, fiscal_period)
 	END AS inventory_amount_plan
 
 	,CASE
-		WHEN first_day_of_period >= first_date_of_current_period THEN 
+		WHEN first_day_of_period >= first_day_of_current_period THEN 
 			starting_inventory + cumulative_production_forecast - cumulative_sales_forecast
 		ELSE
 			LEAD(starting_inventory, 1) OVER (PARTITION BY material_id ORDER BY fiscal_year, fiscal_period)
 	END AS inventory_units_forecast
 
 	,CASE
-		WHEN first_day_of_period >= first_date_of_current_period THEN 
+		WHEN first_day_of_period >= first_day_of_current_period THEN 
 			asp_logic * (starting_inventory + cumulative_production_forecast - cumulative_sales_forecast)
 		ELSE
 			asp_logic * LEAD(starting_inventory, 1) OVER (PARTITION BY material_id ORDER BY fiscal_year, fiscal_period)

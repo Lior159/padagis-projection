@@ -1,4 +1,4 @@
-CREATE OR ALTER VIEW presentation.v_projection_fact_sales AS
+--CREATE OR ALTER VIEW presentation.v_projection_fact_sales AS
 WITH 
 materials AS (
 	SELECT DISTINCT 
@@ -91,7 +91,7 @@ materials AS (
 		,plan_f.[amount]
 	FROM [PowerBI].[dwh].[commercial_actual_financials] AS plan_f
 	JOIN [presentation].[general_dim_date_fiscal] date_f
-		ON plan_f.fiscal_date_int= date_f.fiscaldateint
+		ON plan_f.fiscal_date_int = date_f.fiscaldateint
 	WHERE acount IN ('NORMALIZED_UNITS','NORMALIZED_NET_SALES') AND plan_f.[year] >= YEAR(GETDATE())
 )
 ,sales_actual AS (
@@ -111,14 +111,30 @@ SELECT
 	,COALESCE(sales_forecast.fiscal_year, sales_plan.fiscal_year, sales_actual.fiscal_year) AS fiscal_year
 	,COALESCE(sales_forecast.first_day_of_period, sales_plan.first_day_of_period, sales_actual.first_day_of_period) AS first_day_of_period
 	,sales_plan.units AS units_plan
-	,COALESCE(sales_actual.units, sales_plan.units) AS units_plan_with_actual
-	,sales_plan.sales AS amount_plan
-	,COALESCE(sales_actual.sales, sales_plan.sales) AS amount_plan_with_actual
+	,CASE
+		WHEN COALESCE(sales_forecast.first_day_of_period, sales_plan.first_day_of_period, sales_actual.first_day_of_period) >= first_day_of_current_period.date 
+			THEN sales_plan.units
+		ELSE sales_actual.units
+	END AS units_plan_with_actual
 	,sales_forecast.units_forecast
-	,COALESCE(sales_actual.units, sales_forecast.units_forecast) AS units_forecast_with_actual
-	,sales_forecast.amount_forecast
-	,COALESCE(sales_actual.sales, sales_forecast.amount_forecast) AS amount_forecast_with_actual
+	,CASE
+		WHEN COALESCE(sales_forecast.first_day_of_period, sales_plan.first_day_of_period, sales_actual.first_day_of_period) >= first_day_of_current_period.date 
+			THEN sales_forecast.units_forecast
+		ELSE sales_actual.units
+	END AS units_forecast_with_actual
 	,sales_actual.units AS units_actual
+	,sales_plan.sales AS amount_plan
+	,CASE
+		WHEN COALESCE(sales_forecast.first_day_of_period, sales_plan.first_day_of_period, sales_actual.first_day_of_period) >= first_day_of_current_period.date 
+			THEN sales_plan.sales
+		ELSE sales_actual.sales
+	END AS amount_plan_with_actual
+	,sales_forecast.amount_forecast
+	,CASE
+		WHEN COALESCE(sales_forecast.first_day_of_period, sales_plan.first_day_of_period, sales_actual.first_day_of_period) >= first_day_of_current_period.date 
+			THEN sales_forecast.amount_forecast
+		ELSE sales_actual.sales
+	END AS amount_forecast_with_actual
 	,sales_actual.sales AS amount_actual
 FROM sales_forecast
 FULL JOIN sales_plan
@@ -131,6 +147,8 @@ FULL JOIN sales_actual
 	AND COALESCE(sales_forecast.fiscal_period, sales_plan.fiscal_period) = sales_actual.fiscal_period
 JOIN materials
 	ON COALESCE(sales_forecast.material_id, sales_plan.material_id, sales_actual.material_id) = materials.material_id
+CROSS JOIN first_day_of_current_period
+
 GO
 
 
