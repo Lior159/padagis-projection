@@ -1,4 +1,4 @@
-CREATE OR ALTER VIEW [presentation].[v_projection_fact_inventory] AS
+--CREATE OR ALTER VIEW [presentation].[v_projection_fact_inventory] AS
 WITH 
 dim_date AS (
 	SELECT 
@@ -6,6 +6,7 @@ dim_date AS (
 		CAST(FiscalYear AS INT) AS fiscal_year,
 		CAST(FiscalPeriod AS INT) AS fiscal_period,
 		MIN(DATE) OVER(PARTITION BY FiscalYear, FiscalPeriod) AS first_day_of_period,
+		(COUNT(DATE) OVER (PARTITION BY FiscalYear, FiscalPeriod) / 2) - 1 AS period_days_count,
 		IIF(MIN(DATE) OVER(PARTITION BY FiscalYear, FiscalPeriod) = DATE, 1,0) is_first_day_of_period
 	FROM dwh.general_dim_date_fiscal
 ),
@@ -20,7 +21,9 @@ otif AS (
 )
 ,first_day_of_current_period AS (
 	SELECT 
-		date
+		date,
+		FiscalYear,
+		FiscalPeriod 
 	FROM dwh.general_dim_date_fiscal 
 	WHERE first_day_of_period = 1
 	  AND FiscalPeriod = (SELECT FiscalPeriod FROM dwh.general_dim_date_fiscal WHERE date = CAST(GETDATE() AS DATE))
@@ -39,7 +42,7 @@ otif AS (
 		ON inv.date = dim_date.date 
 		AND dim_date.is_first_day_of_period = 1
 	WHERE [material_no] IS NOT NULL 
-		AND YEAR(inv.[date]) >= 2025
+		AND YEAR(inv.[date]) >= YEAR(GETDATE())
 )
 ,plan_last_doc_date AS (
 	SELECT 
@@ -71,7 +74,7 @@ otif AS (
 		AND production_plan.fiscal_period = dim_date.fiscal_period
 		AND is_first_day_of_period = 1
 	JOIN dim_date AS otif_dim_date
-		ON DATEADD(DAY, 15 + ISNULL(ROUND((otif.planned_delivery_time / 5.0) * 7, 0), 0), dim_date.date) = otif_dim_date.date
+		ON DATEADD(DAY, dim_date.period_days_count + ISNULL(ROUND((otif.planned_delivery_time / 5.0) * 7, 0), 0), dim_date.date) = otif_dim_date.date
 	GROUP BY production_plan.material_id
 		,otif_dim_date.fiscal_year  
 		,otif_dim_date.fiscal_period 
@@ -83,14 +86,24 @@ otif AS (
 		dim_date.fiscal_year,
 		dim_date.fiscal_period,
 		dim_date.first_day_of_period,
-		SUM(coid.order_quantity) AS units_forecast
+		--SUM(IIF(coid.bsc_start >= first_day_of_current_period.date, coid.order_quantity * 0.9, NULL)) AS units_forecast,
+		--SUM(IIF(coid.bsc_start < first_day_of_current_period.date AND coid.act_finish_date > coid.bsc_start, coid.del_quantity, NULL)) AS units_actual
+		SUM(
+			CASE
+				WHEN coid.bsc_start >= first_day_of_current_period.date THEN coid.order_quantity * 0.9
+				WHEN coid.bsc_start < first_day_of_current_period.date AND coid.act_finish_date > coid.bsc_start THEN coid.del_quantity
+			END 
+		) AS units_forecast
+		--SUM(coid.order_quantity * 0.9) AS units_forecast
 	FROM [dwh].[projection_pmn_coid] AS coid
 	JOIN forecast_last_doc_date 
 		ON coid.doc_date = forecast_last_doc_date.date
 	LEFT JOIN otif
 		ON coid.material_id = CAST(otif.material_id AS VARCHAR)
-	JOIN dim_date AS dim_date
+	JOIN dim_date
 		ON DATEADD(DAY, ISNULL(ROUND((otif.planned_delivery_time / 5.0) * 7, 0), 0), coid.bsc_start) = dim_date.date
+	CROSS JOIN first_day_of_current_period
+	WHERE YEAR(coid.bsc_start) >= YEAR(GETDATE())
 	GROUP BY coid.material_id, 
 		dim_date.fiscal_year, 
 		dim_date.fiscal_period,
@@ -131,23 +144,26 @@ otif AS (
 		,sales_plan
 		,SUM(IIF(first_day_of_period >= first_day_of_current_period.date,sales_plan,0)) OVER (
 			PARTITION BY material_id, fiscal_year 
-			ORDER BY fiscal_period) AS sales_plan_running_sum
+			ORDER BY fiscal_period) AS cumulative_sales_plan
 		,sales_forecast
 		,SUM(IIF(first_day_of_period >= first_day_of_current_period.date,sales_forecast,0)) OVER (
 			PARTITION BY material_id, fiscal_year 
-			ORDER BY fiscal_period) AS sales_forecast_running_sum
+			ORDER BY fiscal_period) AS cumulative_sales_forecast
 		,production_plan
 		,SUM(IIF(first_day_of_period >= first_day_of_current_period.date,production_plan,0)) OVER (
 			PARTITION BY material_id, fiscal_year 
-			ORDER BY fiscal_period) AS production_plan_running_sum
+			ORDER BY fiscal_period) AS cumulative_production_plan
 		,production_forecast
 		,SUM(IIF(first_day_of_period >= first_day_of_current_period.date,production_forecast,0)) OVER (
 			PARTITION BY material_id, fiscal_year 
-			ORDER BY fiscal_period) AS production_forecast_running_sum
+			ORDER BY fiscal_period) AS cumulative_production_forecast
 		,CASE
 			WHEN first_day_of_period < first_day_of_current_period.date THEN starting_inventory
 			ELSE MAX(IIF(first_day_of_period >= first_day_of_current_period.date, starting_inventory, NULL)) OVER (PARTITION BY material_id)
-		END AS starting_inventory
+		END AS starting_inventory,
+		first_day_of_current_period.Date AS first_date_of_current_period,
+		first_day_of_current_period.FiscalPeriod AS current_fiscal_period,
+		first_day_of_current_period.FiscalYear AS current_fiscal_year
 	FROM SPI
 	CROSS JOIN first_day_of_current_period
 	--WHERE first_day_of_period >= first_day_of_current_period.date
@@ -165,15 +181,52 @@ SELECT
 	--,production_plan_running_sum
 	,production_forecast
 	--,production_forecast_running_sum
-	,starting_inventory
-	,starting_inventory + production_plan_running_sum - sales_plan_running_sum AS inventory_units_plan
-	,asp * (starting_inventory + production_plan_running_sum - sales_plan_running_sum) AS inventory_amount_plan
-	,starting_inventory + production_forecast_running_sum - sales_forecast_running_sum AS inventory_units_forecast
-	,asp * (starting_inventory + production_forecast_running_sum - sales_forecast_running_sum) AS inventory_amount_forecast
+	,CASE
+		WHEN first_day_of_period >= first_date_of_current_period THEN starting_inventory
+	END AS starting_inventory
+	,CASE
+		WHEN first_day_of_period = first_date_of_current_period THEN starting_inventory
+		WHEN first_day_of_period > first_date_of_current_period THEN 
+			LAG(starting_inventory + cumulative_production_forecast - cumulative_sales_forecast) 
+			OVER (PARTITION BY material_id ORDER BY fiscal_year, fiscal_period)
+	END AS forecast_starting_inventory
+	,CASE
+		WHEN first_day_of_period = first_date_of_current_period THEN starting_inventory
+		WHEN first_day_of_period > first_date_of_current_period THEN 
+			LAG(starting_inventory + cumulative_production_plan - cumulative_sales_plan) 
+			OVER (PARTITION BY material_id ORDER BY fiscal_year, fiscal_period)
+	END AS plan_starting_inventory
+	,CASE
+		WHEN first_day_of_period >= first_date_of_current_period THEN 
+			starting_inventory + cumulative_production_plan - cumulative_sales_plan
+		ELSE
+			LEAD(starting_inventory, 1) OVER (PARTITION BY material_id ORDER BY fiscal_year, fiscal_period)
+	END AS inventory_units_plan
+	,CASE
+		WHEN first_day_of_period >= first_date_of_current_period THEN 
+			asp_logic * (starting_inventory + cumulative_production_plan - cumulative_sales_plan)
+		ELSE
+			asp_logic * LEAD(starting_inventory, 1) OVER (PARTITION BY material_id ORDER BY fiscal_year, fiscal_period)
+	END AS inventory_amount_plan
+
+	,CASE
+		WHEN first_day_of_period >= first_date_of_current_period THEN 
+			starting_inventory + cumulative_production_forecast - cumulative_sales_forecast
+		ELSE
+			LEAD(starting_inventory, 1) OVER (PARTITION BY material_id ORDER BY fiscal_year, fiscal_period)
+	END AS inventory_units_forecast
+
+	,CASE
+		WHEN first_day_of_period >= first_date_of_current_period THEN 
+			asp_logic * (starting_inventory + cumulative_production_forecast - cumulative_sales_forecast)
+		ELSE
+			asp_logic * LEAD(starting_inventory, 1) OVER (PARTITION BY material_id ORDER BY fiscal_year, fiscal_period)
+	END AS inventory_amount_forecast
 FROM inventory_projection 
 LEFT JOIN [dwh].[mng_asp] AS mng_asp
 		ON inventory_projection.material_id = mng_asp.material
 		AND inventory_projection.fiscal_year = YEAR(mng_asp.date)
 		AND inventory_projection.fiscal_period  = MONTH(mng_asp.date)
+WHERE material_id NOT LIKE '4%' 
 --CROSS JOIN first_day_of_current_period
 --WHERE first_day_of_period >= date
